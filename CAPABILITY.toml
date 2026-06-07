@@ -1,0 +1,113 @@
+[crate]
+name = "spectral-fleet-rs"
+version = "0.1.0"
+layer = "spectral"
+description = "Spectral methods for fleet matrices — Lanczos iteration, power iteration, spectral clustering"
+
+[provides]
+capabilities = [
+  { name = "lanczos_iteration", type = "module", description = "Lanczos algorithm for large sparse symmetric matrices to find extreme eigenpairs" },
+  { name = "power_iteration", type = "module", description = "Power iteration with deflation for top-k eigenpairs" },
+  { name = "spectral_clustering", type = "module", description = "Spectral clustering with k-means on eigenvectors of graph Laplacian" },
+  { name = "kmeans", type = "module", description = "Lloyd's k-means clustering algorithm" },
+  { name = "eigenmode_scheduling", type = "module", description = "Eigenvalue-based task scheduling for agent fleets with deadline propagation" },
+  { name = "vector_utils", type = "fn", description = "L2 norm, normalize, dot product, axpy, scale operations on real vectors" }
+]
+exports = [
+  "lanczos::lanczos",
+  "lanczos::tridiag_eigen",
+  "power_iteration::power_iteration",
+  "power_iteration::deflated_top_k",
+  "spectral_clustering::spectral_cluster",
+  "kmeans::kmeans",
+  "scheduling::EigenmodeSchedule",
+  "scheduling::SpectralTask",
+  "scheduling::Deadline",
+  "Real",
+  "l2_norm",
+  "normalize",
+  "dot",
+  "axpy",
+  "scale"
+]
+
+[requires]
+optional = [
+  { crate = "categorical-agents-rs", reason = "Functor-based transformation of spectral embeddings", import = "adjunction::Morphism" },
+  { crate = "t-minus-rs", reason = "Deadline propagation for spectral computation tasks", import = "deadline::DeadlineNode" },
+  { crate = "conservation-law-rs", reason = "Conservation-aware scheduling of eigenvalue computation", import = "lagrangian::total_energy" }
+]
+
+[integrates.categorical_agents]
+crate = "categorical-agents-rs"
+module = "scheduling"
+description = "Apply categorical transformations to spectral embeddings for agent composition"
+human_steps = [
+  "1. cargo add categorical-agents-rs",
+  "2. Use Adjunction functors to transform spectral clustering output",
+  "3. Compose agent clusters via monadic bind operations"
+]
+agent_steps = [
+  "Compute spectral embedding via spectral_clustering module",
+  "Apply adjunction functors to map embeddings between categories",
+  "Use ListMonad to compose non-deterministic clustering results"
+]
+
+[integrates.t_minus]
+crate = "t-minus-rs"
+module = "scheduling"
+description = "Deadline-aware eigenvalue computation: propagate deadlines to spectral tasks, deprioritize expired computations"
+human_steps = [
+  "1. cargo add t-minus-rs",
+  "2. Create Deadline for each spectral computation task",
+  "3. Wire deadline.propagate() into EigenmodeSchedule task loop",
+  "4. Expired tasks are automatically deprioritized"
+]
+agent_steps = [
+  "Create Deadline objects for each spectral task via scheduling::Deadline::new",
+  "Call deadline.propagate(dt) each iteration to track remaining time",
+  "EigenmodeSchedule automatically deprioritizes tasks with expired deadlines",
+  "Use DeadlineStatus to decide whether to continue or abort computation"
+]
+
+[integrates.conservation_law]
+crate = "conservation-law-rs"
+module = "scheduling"
+description = "Energy-aware scheduling: prioritize eigenmode computations by conservation constraints"
+human_steps = [
+  "1. cargo add conservation-law",
+  "2. Use conservation budget to limit spectral computation energy",
+  "3. EigenmodeSchedule respects energy budget when ordering tasks"
+]
+agent_steps = [
+  "Query conservation-law for available energy budget",
+  "Pass energy constraint to EigenmodeSchedule",
+  "Schedule prioritizes bottleneck eigenmodes within energy limits"
+]
+
+[onboarding.human]
+quick_start = "cargo add spectral-fleet"
+example = """
+use spectral_fleet::{power_iteration, spectral_cluster, l2_norm};
+
+let matrix = vec![
+    vec![4.0, 1.0, 0.0],
+    vec![1.0, 3.0, 1.0],
+    vec![0.0, 1.0, 2.0],
+];
+let (eigenvalue, eigenvector) = power_iteration::power_iteration(&matrix, 100, 1e-10);
+println!(\"Dominant eigenvalue: {}\", eigenvalue);
+"""
+
+[onboarding.agent]
+context_needed = ["matrix_dimensions", "num_clusters", "computation_deadline", "energy_budget"]
+api_surface = [
+  "power_iteration::power_iteration(matrix, max_iter, tol)",
+  "power_iteration::deflated_top_k(matrix, k, max_iter, tol)",
+  "lanczos::lanczos(mat_vec, n, num_iter)",
+  "spectral_cluster::spectral_cluster(adjacency, k)",
+  "kmeans::kmeans(data, k, max_iter)",
+  "scheduling::EigenmodeSchedule::new(tasks)",
+  "scheduling::Deadline::new(task_id, budget)"
+]
+integration_pattern = "Construct adjacency/performance matrix, compute eigenpairs via power_iteration or lanczos, cluster agents with spectral_cluster, schedule tasks by eigenmode priority with deadline constraints"
