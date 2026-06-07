@@ -10,6 +10,7 @@ pub mod kmeans;
 pub mod lanczos;
 pub mod power_iteration;
 pub mod spectral_clustering;
+pub mod scheduling;
 
 use num_traits::{Float, NumAssign};
 
