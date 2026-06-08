@@ -1,111 +1,148 @@
-# Integration Guide: spectral-fleet
+# INTEGRATION.md — spectral-fleet-rs × conservation-law-rs × entropy-conservation-rs
 
-## What This Crate Provides
+**Spectral fleet methods** use eigenvalue decomposition and clustering to
+rank and group agents. They connect to Lagrangian dynamics for evolving
+agent states and to entropy conservation for analyzing information flow in
+fleet matrices.
 
-- **`LanczosResult<S>`** — Tridiagonal matrix + orthonormal basis from Lanczos iteration for large sparse symmetric matrices
-- **`SymmetricOperator<S>`** trait — Define custom symmetric linear operators (matrix-free)
-- **`DenseSymmetricOp<S>`** — Dense symmetric matrix operator
-- **`top_k_eigenpairs()`** — Power iteration with deflation for top-k eigenpairs
-- **`SpectralClustering`** — Ng–Jordan–Weiss spectral clustering via normalized graph Laplacian
-- **`kmeans()`** — K-means clustering (used internally by spectral clustering)
-- **`Deadline`** — Deadline for spectral computation tasks with propagation and expiry
-- **`EigenmodeScheduler`** — Bottleneck-first scheduling using eigenvalue decomposition
-- **Vector utilities**: `l2_norm`, `normalize`, `dot`, `axpy`, `scale`
+## Synergy Map
 
-This crate provides spectral methods for fleet matrix analysis: eigenvalue decomposition, spectral clustering, and eigenvalue-based task scheduling for agent fleets.
-
-## How to Add This Crate
-
-```bash
-cargo add spectral-fleet
 ```
+conservation-law-rs           spectral-fleet-rs              entropy-conservation-rs
+┌──────────────────┐         ┌──────────────────────┐       ┌─────────────────────┐
+│ SymplecticIntegr  │◄──────►│ lanczos              │◄─────►│ decompose           │
+│ AgentState        │         │ power_iteration      │       │ gradient_energy     │
+│ verify_noether    │         │ top_k_eigenpairs     │       │ curl_energy         │
+│ total_energy      │         │ spectral_clustering  │       │ harmonic_energy     │
+└──────────────────┘         │ kmeans               │       └─────────────────────┘
+                             │ l2_norm              │
+                             └──────────────────────┘
+```
+
+## Key Insight
+
+Agent fleets form affinity graphs. Spectral-fleet extracts structure from
+these graphs via eigen decomposition. Conservation-law ensures the
+underlying dynamics are symplectic (energy-preserving), and
+entropy-conservation decomposes the fleet's information flows into
+gradient (hierarchical), curl (cyclic), and harmonic (lossy) components.
+
+## Example 1: Symplectic Evolution of Agent Affinities
+
+Evolve an agent fleet under a potential while periodically re-computing
+its spectral ranking.
 
 ```rust
-use spectral_fleet::lanczos::{DenseSymmetricOp, lanczos_iteration};
-use spectral_fleet::Real;
+use conservation_law::lagrangian::{AgentState, MechanicalLagrangian, SymplecticIntegrator};
+use spectral_fleet::power_iteration::{power_iterate, DenseOp, Operator};
+use spectral_fleet::normalize;
 
-let op = DenseSymmetricOp { data: vec![
-    vec![4.0, 1.0, 0.0],
-    vec![1.0, 3.0, 1.0],
-    vec![0.0, 1.0, 2.0],
-]};
-let start = vec![1.0, 0.0, 0.0];
-let result = lanczos_iteration(&op, &start, 3, 1e-10).unwrap();
-println!("Eigenvalues: {:?}", result.alpha);
+fn evolve_and_rank() {
+    let potential = |q: &[f64; 2]| 0.5 * (q[0] * q[0] + q[1] * q[1]);
+    let integrator = SymplecticIntegrator::new(0.01).unwrap();
+    let mut state = AgentState::new([1.0, 0.0], [0.0, 1.0]);
+
+    // Affinity matrix evolves with state distance
+    let mut affinity = vec![vec![0.0; 2]; 2];
+    for step in 0..100 {
+        state = integrator.step(1.0, &potential, &state).unwrap();
+        let d2 = state.q[0] * state.q[0] + state.q[1] * state.q[1];
+        affinity[0][0] = 1.0;
+        affinity[1][1] = 1.0;
+        affinity[0][1] = (-d2).exp();
+        affinity[1][0] = affinity[0][1];
+
+        if step % 20 == 0 {
+            let op = DenseOp { matrix: affinity.clone() };
+            let mut v0 = vec![1.0, 1.0];
+            normalize(&mut v0);
+            let pair = power_iterate(&op, &v0, 100, 1e-8).unwrap();
+            println!("step {}: eigenvalue = {:.4}", step, pair.value);
+        }
+    }
+}
 ```
 
-## Integration Points
+## Example 2: Spectral Clustering with Entropy Decomposition
 
-### t-minus
-
-- **Why**: t-minus provides deadline propagation and scheduling; spectral-fleet's `EigenmodeScheduler` determines task priority from eigenvalue decomposition. The slowest eigenmode (smallest eigenvalue) identifies bottlenecks and gets highest priority.
-- **How**: Use `Deadline` from spectral-fleet's scheduling module, which mirrors t-minus deadline semantics. Feed eigenvalue-based priorities into t-minus's cron scheduler.
+Cluster agents by affinity, then decompose the inter-cluster entropy flow.
 
 ```rust
-use spectral_fleet::scheduling::{Deadline, EigenmodeScheduler};
+use spectral_fleet::spectral_clustering::spectral_clustering;
+use entropy_conservation::hodge_decomposition::decompose;
+use rand::thread_rng;
 
-// Compute fleet eigenvalues, then schedule bottleneck-first
-let eigenvalues = vec![0.0, 0.15, 0.42, 1.1, 2.3];
-let scheduler = EigenmodeScheduler::new(eigenvalues);
+fn cluster_and_decompose(affinity: &[Vec<f64>]) {
+    let mut rng = thread_rng();
+    let result = spectral_clustering(affinity, 2, 100, 1e-8, &mut rng).unwrap();
+    println!("Cluster labels: {:?}", result.labels);
 
-// Create deadlines for each eigenmode task
-let deadlines: Vec<Deadline> = (0..5)
-    .map(|i| Deadline::new(i, scheduler.budget_for_mode(i)))
-    .collect();
+    // Build a coarse entropy-flow matrix between clusters
+    let mut cluster_flow = vec![vec![0.0; 2]; 2];
+    for (i, row) in affinity.iter().enumerate() {
+        for (j, &a) in row.iter().enumerate() {
+            let ci = result.labels[i];
+            let cj = result.labels[j];
+            cluster_flow[ci][cj] += a;
+        }
+    }
 
-// Smallest eigenvalue → highest priority → tightest deadline
-println!("Bottleneck mode budget: {}", deadlines[0].budget);
+    let hodge = decompose(&cluster_flow);
+    println!("Gradient (hierarchical flow): {:.4}", hodge.gradient_energy());
+    println!("Curl (cyclic alliance): {:.4}", hodge.curl_energy());
+    println!("Harmonic (information loss): {:.4}", hodge.harmonic_energy());
+}
 ```
 
-### categorical-agents
+## Example 3: Lanczos Iteration for Large Fleet Matrices
 
-- **Why**: categorical-agents provides category-theoretic composition (adjunctions, monads, comonads); spectral-fleet provides the spectral analysis that determines HOW agents should be clustered/composed. Spectral clustering outputs groupings that become categorical compositions.
-- **How**: Run spectral clustering on the fleet affinity matrix, then use the cluster assignments as inputs to categorical-agents' monadic composition.
+For fleets too large for dense power iteration, use Lanczos to find the
+extremal eigenvalues of the affinity operator.
 
 ```rust
-use spectral_fleet::spectral_clustering::spectral_cluster;
+use spectral_fleet::lanczos::{lanczos, DenseSymmetricOp, SymmetricOperator};
 
-// Agent affinity matrix (symmetric)
-let affinity = vec![
-    vec![1.0, 0.9, 0.1],
-    vec![0.9, 1.0, 0.2],
-    vec![0.1, 0.2, 1.0],
-];
-let (labels, _centers) = spectral_cluster(&affinity, 2, 100).unwrap();
-// labels = [0, 0, 1] — agents 0 and 1 cluster together
+fn large_fleet_spectral_gap(affinity: &[Vec<f64>]) {
+    let op = DenseSymmetricOp { data: affinity.to_vec() };
+    let n = affinity.len();
+    let q0 = vec![1.0; n];
+    let result = lanczos(&op, &q0, 20).unwrap();
+    println!("Lanczos alphas: {:?}", result.alpha);
+    println!("Lanczos betas: {:?}", result.beta);
+    // The smallest eigenvalue of the tridiagonal approximates the spectral gap
+}
 ```
 
-### conservation-law
+## Cargo.toml Wiring
 
-- **Why**: conservation-law defines the invariant γ + H = C; the spectral gap γ IS the smallest non-zero eigenvalue from spectral-fleet. The Fiedler value directly measures conservation health.
-- **How**: Extract the Fiedler value (second-smallest eigenvalue) from the fleet Laplacian and feed it to conservation-law as the spectral gap γ.
+```toml
+[dependencies]
+spectral-fleet = { git = "https://github.com/SuperInstance/spectral-fleet-rs" }
+conservation-law = { git = "https://github.com/SuperInstance/conservation-law-rs" }
+entropy-conservation = { git = "https://github.com/SuperInstance/entropy-conservation-rs" }
+```
+
+## Design Patterns
+
+### Pattern: Dynamic Fleet Rebalancing
+
+Recompute spectral rankings after each agent join/leave to maintain
+optimal workload distribution:
 
 ```rust
-use spectral_fleet::power_iteration::top_k_eigenpairs;
-use spectral_fleet::lanczos::DenseSymmetricOp;
+use spectral_fleet::spectral_clustering::spectral_clustering;
+use rand::thread_rng;
 
-// Fleet Laplacian (from adjacency structure)
-let laplacian = DenseSymmetricOp { data: compute_fleet_laplacian() };
-let (eigenvalues, _eigenvectors) = top_k_eigenpairs(&laplacian, 3, 100, 1e-10).unwrap();
+fn rebalance_on_change(affinity: &mut Vec<Vec<f64>>, joined: usize, workload: f64) {
+    let n = affinity.len();
+    for i in 0..n {
+        affinity[i].push((-workload).exp());
+    }
+    affinity.push(vec![0.0; n + 1]);
+    affinity[n][n] = 1.0;
 
-// Spectral gap = Fiedler value = second smallest eigenvalue
-let gamma = eigenvalues.iter().filter(|&&e| e > 1e-10).cloned().reduce(f64::min);
-println!("Spectral gap γ = {:?}", gamma);
+    let mut rng = thread_rng();
+    let result = spectral_clustering(affinity, 3, 50, 1e-6, &mut rng).unwrap();
+    println!("Agent {} assigned to cluster {}", joined, result.labels[n]);
+}
 ```
-
-## For AI Agents
-
-- **Context needed**: Fleet adjacency/affinity matrix, number of clusters k, convergence tolerance
-- **Key imports**: `spectral_fleet::lanczos::*`, `spectral_fleet::spectral_clustering::*`, `spectral_fleet::scheduling::*`
-- **Integration pattern**: Build affinity matrix → run `spectral_cluster()` → extract cluster labels → feed to downstream composition/scheduling
-- **Error handling**: `LanczosError` (breakdown, zero start vector), `SpectralError` (k-means failure, eigen computation failure). Always handle `Breakdown` — it means the matrix has fewer distinct eigenvalues than requested Krylov subspace dimension.
-
-## For Humans
-
-- **Prerequisites**: Linear algebra (eigenvalues, Laplacian matrices), basic graph theory
-- **Learning path**: Start with `power_iteration.rs` (simplest eigenvalue method), then `lanczos.rs` (scalable), then `spectral_clustering.rs` (application), then `scheduling.rs` (production integration)
-- **Common pitfalls**:
-  - The `SymmetricOperator` trait requires the matrix to be symmetric — non-symmetric inputs produce garbage
-  - Lanczos breakdown is normal for matrices with eigenvalue multiplicity; handle it gracefully
-  - Spectral clustering quality depends heavily on the affinity matrix — use a suitable kernel for your data
-  - The `Real` trait requires `Send + Sync` — use `f64` for most cases
